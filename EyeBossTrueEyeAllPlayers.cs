@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Microsoft.Xna.Framework;
 using Terraria;
-using Terraria.DataStructures;
 using Terraria.ID;
 using TerrariaApi.Server;
 using TShockAPI;
@@ -10,86 +9,49 @@ using TShockAPI;
 namespace EyeBossTrueEyeAllPlayers
 {
     [ApiVersion(2, 1)]
-    public class EyeBossTrueEyeAllPlayersPlugin : TerrariaPlugin
+    public class EyeBossTrueEyeAllPlayers : TerrariaPlugin
     {
         public override string Name => "EyeBossTrueEyeAllPlayers";
         public override string Author => "Shokuya";
-        public override string Description => "Phase 2 heals to 100%, True Eye tracks all players, 10% HP ultimate with clones & 10s UFO chase, minecart & clone laser one-shot kills, no normal mobs while boss active, then 5s rapid 1-damage dashes before surrendering idle in front of players";
-        public override Version Version => new Version(2, 3, 0);
+        public override string Description => "Eye of Cthulhu rework with True Eye for all players and 10% ultimate sequence.";
+        public override Version Version => new Version(1, 0, 0, 0);
 
-        private const int SphereCount = 1;
-        private const int TicksPerSecond = 60;
-        private const int CycleLengthTicks = 10 * TicksPerSecond;          // 10 วินาที
-        private const int TelegraphDurationTicks = 3 * TicksPerSecond;      // เตือนลูกบอล 3 วินาที
-
-        // ไทม์ไลน์ช่วงท่าไม้ตาย (หน่วย: เฟรม, 60 เฟรม = 1 วินาที)
-        private const int Stage1_HideBossTicks = 1 * TicksPerSecond;          // 0 - 1s: บอสจริงหายตัว
-        private const int Stage2_DualChargeTicks = 3 * TicksPerSecond;        // 1 - 4s: 2 โคลนชาร์จเลเซอร์ 3 วิ
-        private const int Stage3_DualFireHoldTicks = 2 * TicksPerSecond;      // 4 - 6s: 2 โคลนยิงเลเซอร์ค้าง 2 วิ
-        private const int Stage4_SingleTopRightChargeTicks = 3 * TicksPerSecond;// 6 - 9s: เหลือโคลนเดียวอยู่ขวาบน ชาร์จ 3 วิ
-        private const int Stage5_InnerLaserAndWaitTicks = 3 * TicksPerSecond;   // 9 - 12s: ยิงจากด้านใน แล้วจับเวลา 3 วิ
-        private const int Stage6_UfoChaseTicks = 10 * TicksPerSecond;         // 12 - 22s: ไล่ผู้เล่นแบบ UFO นาน 10 วินาที ไม่ยิงกระสุนเพิ่ม
-
-        // ช่วงหลังจบท่าไม้ตายทั้งหมด: พุ่งรัวดาเมจ 1 นาน 5 วินาที -> ยอมแพ้นิ่งตรงหน้าผู้เล่น
-        private const int PostUltimateRapidDashTicks = 5 * TicksPerSecond;    // พุ่งใส่รัวๆ ~5 วินาที
-        private const int RapidDashIntervalTicks = 18;                      // พุ่งถี่ทุก ~0.3 วินาที
-        private const float RapidDashSpeed = 16.5f;
-
-        // ความเร็วระดับรองเท้าวิ่งเร็วระดับสูง
-        private const float HighSpeedShoeChaseSpeed = 13.5f;
-
-        private class BossPhaseState
+        private enum UltStage
         {
-            public bool IsPhase2 = false;
-            public bool HasRevivedToFullHealth = false;
-            public bool HasUsedUltimateAt10Percent = false;
-            public bool IsHiddenForUltimate = false;
-            public bool IsInRapidDashAfterUltimate = false;
-            public bool HasSurrendered = false;
-            public int RapidDashTimerTicks = 0;
-            public int DashPulseCooldown = 0;
+            None = 0,
+            PullAndLock = 1,
+            CloneLaser2s = 2,
+            TopRightClone3s = 3,
+            UfoDash10s = 4,
+            RapidDash1Dmg5s = 5,
+            SurrenderIdle = 6
         }
 
-        private class PlayerEyeState
+        private class BossState
         {
-            public int EyeNpcIndex = -1;
-            public int CycleTicks = 0;
-            public int TelegraphProjIndex = -1;
-            public bool HasLaunchedThisCycle = false;
+            public int BossNpcIndex = -1;
+            public bool Phase2Triggered = false;
+            public bool UltTriggered = false;
+            public UltStage Stage = UltStage.None;
+            public int StageTicks = 0;
+            public List<int> CloneIndices = new List<int>();
+            public List<int> TrueEyeIndices = new List<int>();
+            public int TrueEyeSpawnCooldown = 0;
+            public Vector2 SurrenderPos = Vector2.Zero;
         }
 
-        private readonly Dictionary<int, BossPhaseState> _bossStates = new Dictionary<int, BossPhaseState>();
-        private readonly Dictionary<int, PlayerEyeState> _playerEyes = new Dictionary<int, PlayerEyeState>();
+        private readonly BossState _state = new BossState();
+        private readonly Dictionary<int, float> _lockedXByPlayer = new Dictionary<int, float>();
+        private readonly HashSet<int> _cartDeathHandled = new HashSet<int>();
 
-        private bool _wasPhase2Active = false;
-        private int _globalTick = 0;
-
-        // สถานะเฟสท่าไม้ตาย
-        private bool _isUltimatePhaseActive = false;
-        private int _ultimateTimerTicks = 0;
-        private Vector2 _ultimateGatherPoint = Vector2.Zero;
-        private float _groundStandY = 0f;
-
-        private int _topRightCloneIndex = -1;
-        private int _bottomLeftCloneIndex = -1;
-        private int _soloHunterCloneIndex = -1;
-
-        private bool _dualClonesSpawned = false;
-        private bool _dualLasersFired = false;
-        private bool _soloClonePrepared = false;
-        private bool _innerLaserFired = false;
-        private bool _chaseStarted = false;
-
-        private readonly List<int> _activeLaserProjIndices = new List<int>();
-        private readonly HashSet<int> _deadByLaserThisTick = new HashSet<int>();
-        private readonly HashSet<int> _hitByRapidDashOneDamageThisTick = new HashSet<int>();
-
-        public EyeBossTrueEyeAllPlayersPlugin(Main game) : base(game) { }
+        public EyeBossTrueEyeAllPlayers(Main game) : base(game) { }
 
         public override void Initialize()
         {
             ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
             ServerApi.Hooks.NpcSpawn.Register(this, OnNpcSpawn);
+            ServerApi.Hooks.NpcStrike.Register(this, OnNpcStrike);
+            ServerApi.Hooks.NetGetData.Register(this, OnNetGetData);
         }
 
         protected override void Dispose(bool disposing)
@@ -98,423 +60,481 @@ namespace EyeBossTrueEyeAllPlayers
             {
                 ServerApi.Hooks.GameUpdate.Deregister(this, OnGameUpdate);
                 ServerApi.Hooks.NpcSpawn.Deregister(this, OnNpcSpawn);
-                CleanupAll();
+                ServerApi.Hooks.NpcStrike.Deregister(this, OnNpcStrike);
+                ServerApi.Hooks.NetGetData.Deregister(this, OnNetGetData);
             }
             base.Dispose(disposing);
         }
 
+        private bool IsBossActive()
+        {
+            if (_state.BossNpcIndex < 0 || _state.BossNpcIndex >= Main.maxNPCs)
+                return false;
+
+            NPC boss = Main.npc[_state.BossNpcIndex];
+            return boss.active && boss.type == NPCID.EyeofCthulhu;
+        }
+
+        private void FindOrSyncBoss()
+        {
+            if (IsBossActive())
+                return;
+
+            _state.BossNpcIndex = -1;
+            for (int i = 0; i < Main.maxNPCs; i++)
+            {
+                NPC npc = Main.npc[i];
+                if (npc.active && npc.type == NPCID.EyeofCthulhu)
+                {
+                    _state.BossNpcIndex = i;
+                    break;
+                }
+            }
+
+            if (_state.BossNpcIndex == -1)
+            {
+                CleanupClonesAndEyes();
+                _state.Phase2Triggered = false;
+                _state.UltTriggered = false;
+                _state.Stage = UltStage.None;
+                _state.StageTicks = 0;
+                _lockedXByPlayer.Clear();
+                _cartDeathHandled.Clear();
+            }
+        }
+
+        private void CleanupClonesAndEyes()
+        {
+            foreach (int idx in _state.CloneIndices)
+            {
+                if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
+                {
+                    Main.npc[idx].active = false;
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
+                }
+            }
+            _state.CloneIndices.Clear();
+
+            foreach (int idx in _state.TrueEyeIndices)
+            {
+                if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
+                {
+                    Main.npc[idx].active = false;
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
+                }
+            }
+            _state.TrueEyeIndices.Clear();
+        }
+
         private void OnNpcSpawn(NpcSpawnEventArgs args)
         {
-            if (!HasAnyEyeBossInMap())
+            if (args.Handled)
+                return;
+
+            FindOrSyncBoss();
+            if (!IsBossActive())
                 return;
 
             if (args.NpcId < 0 || args.NpcId >= Main.maxNPCs)
                 return;
 
             NPC spawned = Main.npc[args.NpcId];
-            if (spawned == null || !spawned.active)
+            if (!spawned.active)
                 return;
 
-            if (IsNormalMonster(spawned))
+            // ห้ามมอนสเตอร์ปกติเกิดตลอดที่บอสอยู่ ยกเว้นลูกน้องบอส (Servant of Cthulhu) และบอส/ร่างโคลน/True Eye ที่ปลั๊กอินสร้าง
+            bool isAllowedNpc =
+                spawned.type == NPCID.EyeofCthulhu ||
+                spawned.type == NPCID.ServantofCthulhu ||
+                spawned.type == NPCID.Retinazer ||
+                spawned.type == NPCID.Spazmatism ||
+                spawned.boss ||
+                _state.CloneIndices.Contains(args.NpcId) ||
+                _state.TrueEyeIndices.Contains(args.NpcId);
+
+            if (!isAllowedNpc)
+            {
+                spawned.active = false;
+                spawned.netSkip = -1;
+                TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", args.NpcId);
+                args.Handled = true;
+            }
+        }
+
+        private void OnNpcStrike(NpcStrikeEventArgs args)
+        {
+            if (!IsBossActive())
+                return;
+
+            if (args.Npc.whoAmI == _state.BossNpcIndex && _state.Stage == UltStage.SurrenderIdle)
             {
                 args.Handled = true;
-                spawned.active = false;
-                NetMessage.SendData((int)PacketTypes.NpcUpdate, -1, -1, null, args.NpcId);
+            }
+        }
+
+        private void OnNetGetData(GetDataEventArgs args)
+        {
+            if (args.Handled || !IsBossActive())
+                return;
+
+            if (args.MsgID == PacketTypes.PlayerSpawn || args.MsgID == PacketTypes.PlayerControls)
+            {
+                int plrIdx = args.Msg.whoAmI;
+                if (plrIdx >= 0 && plrIdx < Main.maxPlayers && _lockedXByPlayer.ContainsKey(plrIdx))
+                {
+                    Player p = Main.player[plrIdx];
+                    if (p != null && p.active && !p.dead)
+                    {
+                        p.position.X = _lockedXByPlayer[plrIdx];
+                        p.velocity.X = 0f;
+                    }
+                }
             }
         }
 
         private void OnGameUpdate(EventArgs args)
         {
-            _globalTick++;
-            _hitByRapidDashOneDamageThisTick.Clear();
+            FindOrSyncBoss();
+            if (!IsBossActive())
+                return;
 
-            bool anyEyeBossInMap = HasAnyEyeBossInMap();
+            NPC boss = Main.npc[_state.BossNpcIndex];
 
-            if (anyEyeBossInMap)
+            // กฎใช้รถรางตายทันทีเมื่อบอสอยู่
+            EnforceMinecartInstantKill();
+
+            // คุมไม่ให้มอนสเตอร์ปกติโผล่ระหว่างสู้บอส
+            BlockNormalEnemiesWhileBossAlive(boss);
+
+            // ถ้าอยู่ในสถานะยอมแพ้: นิ่งอยู่ตรงหน้าผู้เล่นและไม่ทำอะไรเลย
+            if (_state.Stage == UltStage.SurrenderIdle)
             {
-                SuppressNormalMonstersInMap();
-            }
-
-            CheckMinecartInstantDeath();
-
-            bool triggerUltimateNow = false;
-            NPC triggeringBoss = null;
-            bool hasActiveBossSequence = UpdateBossesAndCheckPhase2(out triggerUltimateNow, out triggeringBoss);
-
-            if (!hasActiveBossSequence)
-            {
-                if (_wasPhase2Active || _playerEyes.Count > 0 || _isUltimatePhaseActive)
-                {
-                    CleanupAll();
-                    _wasPhase2Active = false;
-                }
+                HandleSurrenderIdle(boss);
                 return;
             }
 
-            if (!_wasPhase2Active)
+            // เฟส 2: ฮีลเลือด 100% ถาวรเมื่อเข้าสู่เฟส 2
+            if (!_state.Phase2Triggered && (boss.ai[0] >= 1f || boss.life <= boss.lifeMax / 2))
             {
-                _wasPhase2Active = true;
-                TSPlayer.All.SendWarningMessage("Eye of Cthulhu เข้าเฟส 2! เลือดกลับมาเต็ม 100% แล้ว True Eye ตามติดผู้เล่นทุกคน >:(");
+                _state.Phase2Triggered = true;
+                boss.life = boss.lifeMax;
+                TSPlayer.All.SendData(PacketTypes.NpcHP, "", boss.whoAmI);
+                TSPlayer.All.SendInfoMessage("Eye of Cthulhu เข้าสู่เฟส 2 และฟื้นฟูพลังชีวิต 100% ถาวร!");
             }
 
-            if (triggerUltimateNow)
+            if (_state.Phase2Triggered)
             {
-                StartUltimatePhase(triggeringBoss);
-            }
-
-            if (_isUltimatePhaseActive)
-            {
-                UpdateUltimateSequence();
-            }
-
-            // อัปเดตพฤติกรรมหลังจบท่าไม้ตาย (พุ่งรัวดาเมจ 1 นาน ~5 วิ -> ยอมแพ้นิ่งตรงหน้าผู้เล่น)
-            UpdatePostUltimateBossBehaviors();
-
-            CheckCloneLaserInstantKill();
-
-            bool anyBossSurrendered = HasAnySurrenderedBoss();
-
-            // ตรวจผู้เล่นทุกคนในแมพ
-            for (int pIdx = 0; pIdx < Main.maxPlayers; pIdx++)
-            {
-                Player player = Main.player[pIdx];
-                bool isValidPlayer = player != null && player.active && !player.dead;
-
-                if (isValidPlayer)
+                if (boss.life < boss.lifeMax)
                 {
-                    if (!_playerEyes.TryGetValue(pIdx, out PlayerEyeState state))
-                    {
-                        state = new PlayerEyeState();
-                        _playerEyes[pIdx] = state;
-                    }
-
-                    // ถ้าบอสยอมแพ้แล้วหรืออยู่ในเฟสไม้ตาย ให้หยุดเสก/ยิงลูกบอล Phantasmal Sphere
-                    if (_isUltimatePhaseActive || anyBossSurrendered)
-                    {
-                        ClearTelegraphSphere(state);
-                        if (_isUltimatePhaseActive)
-                        {
-                            KeepTrueEyeHovering(pIdx, player, state);
-                        }
-                        else
-                        {
-                            CleanupPlayerEye(pIdx);
-                        }
-                    }
-                    else
-                    {
-                        UpdatePlayerEye(pIdx, player, state);
-                    }
+                    boss.life = boss.lifeMax;
+                    TSPlayer.All.SendData(PacketTypes.NpcHP, "", boss.whoAmI);
                 }
-                else if (_playerEyes.ContainsKey(pIdx))
+
+                // True Eye ตามผู้เล่นทุกคนอย่างต่อเนื่อง
+                MaintainTrueEyesForAllPlayers(boss);
+            }
+
+            // ทริกเกอร์ท่าไม้ตายเมื่อเลือดถึงหรือต่ำกว่า 10%
+            if (!_state.UltTriggered && boss.life <= boss.lifeMax * 0.10f)
+            {
+                _state.UltTriggered = true;
+                _state.Stage = UltStage.PullAndLock;
+                _state.StageTicks = 0;
+                _lockedXByPlayer.Clear();
+                TSPlayer.All.SendWarningMessage("Eye of Cthulhu เตรียมใช้ท่าไม้ตาย! รวมตัวกันไว้!");
+            }
+
+            if (_state.UltTriggered)
+            {
+                RunUltimateSequence(boss);
+            }
+        }
+
+        private void EnforceMinecartInstantKill()
+        {
+            for (int i = 0; i < Main.maxPlayers; i++)
+            {
+                Player p = Main.player[i];
+                TSPlayer tsPlayer = TShock.Players[i];
+                if (p == null || tsPlayer == null || !p.active || tsPlayer.Dead)
+                    continue;
+
+                bool ridingMinecart = p.mount.Active &&
+                    (p.mount.Type == MountID.Minecart ||
+                     p.mount.Type == MountID.WoodMinecart ||
+                     p.mount.Type == MountID.MinecartMech ||
+                     p.mount.Type == MountID.MeowmereMinecart);
+
+                if (ridingMinecart && !_cartDeathHandled.Contains(i))
                 {
-                    CleanupPlayerEye(pIdx);
+                    _cartDeathHandled.Add(i);
+                    p.mount.Dismount(p);
+                    tsPlayer.KillPlayer();
+                    tsPlayer.SendErrorMessage("ห้ามใช้รถรางขณะสู้กับ Eye of Cthulhu! โดนลงโทษตายทันที");
+                }
+                else if (!ridingMinecart)
+                {
+                    _cartDeathHandled.Remove(i);
                 }
             }
         }
 
-        private bool HasAnySurrenderedBoss()
+        private void BlockNormalEnemiesWhileBossAlive(NPC boss)
         {
-            foreach (KeyValuePair<int, BossPhaseState> kv in _bossStates)
+            for (int i = 0; i < Main.maxNPCs; i++)
             {
-                if (kv.Value.HasSurrendered)
-                    return true;
-            }
-            return false;
-        }
-
-        private void UpdatePostUltimateBossBehaviors()
-        {
-            foreach (KeyValuePair<int, BossPhaseState> kv in _bossStates)
-            {
-                int idx = kv.Key;
-                BossPhaseState state = kv.Value;
-
-                if (idx < 0 || idx >= Main.maxNPCs)
+                if (i == _state.BossNpcIndex || _state.CloneIndices.Contains(i) || _state.TrueEyeIndices.Contains(i))
                     continue;
 
-                NPC boss = Main.npc[idx];
-                if (boss == null || !boss.active || boss.type != NPCID.EyeofCthulhu || boss.life <= 0)
+                NPC npc = Main.npc[i];
+                if (!npc.active)
                     continue;
 
-                if (state.IsInRapidDashAfterUltimate)
+                if (npc.type == NPCID.ServantofCthulhu || npc.boss)
+                    continue;
+
+                if (!npc.friendly && npc.lifeMax > 5)
                 {
-                    state.RapidDashTimerTicks++;
-                    boss.damage = 1;
-                    boss.dontTakeDamage = false;
-
-                    Player target = FindNearestAlivePlayer(boss.Center);
-                    if (target != null)
-                    {
-                        state.DashPulseCooldown--;
-                        if (state.DashPulseCooldown <= 0)
-                        {
-                            state.DashPulseCooldown = RapidDashIntervalTicks;
-                            Vector2 dir = target.Center - boss.Center;
-                            if (dir == Vector2.Zero) dir = new Vector2(1f, 0f);
-                            dir.Normalize();
-                            boss.velocity = dir * RapidDashSpeed;
-                            boss.rotation = (float)Math.Atan2(boss.velocity.Y, boss.velocity.X) - MathHelper.PiOver2;
-                            boss.direction = boss.velocity.X >= 0f ? 1 : -1;
-                            boss.spriteDirection = boss.direction;
-                            boss.netUpdate = true;
-                        }
-
-                        // ให้ดาเมจจากการพุ่งชนเพียงแค่ 1 เท่านั้น
-                        ApplyExactOneDamageOnTouch(boss);
-                    }
-
-                    if (_globalTick % 2 == 0)
-                    {
-                        NetMessage.SendData((int)PacketTypes.NpcUpdate, -1, -1, null, idx);
-                    }
-
-                    if (state.RapidDashTimerTicks >= PostUltimateRapidDashTicks)
-                    {
-                        state.IsInRapidDashAfterUltimate = false;
-                        state.HasSurrendered = true;
-                        boss.velocity = Vector2.Zero;
-                        boss.damage = 0;
-                        boss.dontTakeDamage = true;
-                        boss.netUpdate = true;
-                        NetMessage.SendData((int)PacketTypes.NpcUpdate, -1, -1, null, idx);
-                        TSPlayer.All.SendInfoMessage($"{boss.FullName} พุ่งครบ 5 วินาทีแล้วและยอมแพ้! อยู่ตรงหน้าผู้เล่นและไม่ทำอะไรเลย :3");
-                    }
-                }
-                else if (state.HasSurrendered)
-                {
-                    // บอสยอมแพ้: อยู่ตรงหน้าผู้เล่นและไม่ทำอะไรผู้เล่น / ไม่ทำอะไรเลย
-                    boss.damage = 0;
-                    boss.dontTakeDamage = true;
-                    boss.velocity = Vector2.Zero;
-
-                    Player target = FindNearestAlivePlayer(boss.Center);
-                    if (target != null)
-                    {
-                        int faceDir = target.Center.X >= boss.Center.X ? 1 : -1;
-                        Vector2 inFrontOfPlayer = target.Center + new Vector2(faceDir * 95f, -16f);
-                        boss.Center = inFrontOfPlayer;
-                        boss.direction = -faceDir;
-                        boss.spriteDirection = -faceDir;
-                        boss.rotation = faceDir > 0 ? MathHelper.Pi : 0f;
-                    }
-
-                    if (_globalTick % 4 == 0)
-                    {
-                        NetMessage.SendData((int)PacketTypes.NpcUpdate, -1, -1, null, idx);
-                    }
+                    npc.active = false;
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", i);
                 }
             }
         }
 
-        private void ApplyExactOneDamageOnTouch(NPC boss)
+        private void MaintainTrueEyesForAllPlayers(NPC boss)
         {
-            float hitRange = Math.Max(boss.width, boss.height) * 0.65f;
+            if (_state.TrueEyeSpawnCooldown > 0)
+                _state.TrueEyeSpawnCooldown--;
 
-            for (int pIdx = 0; pIdx < Main.maxPlayers; pIdx++)
+            for (int i = 0; i < Main.maxPlayers; i++)
             {
-                if (_hitByRapidDashOneDamageThisTick.Contains(pIdx))
-                    continue;
-
-                Player p = Main.player[pIdx];
+                Player p = Main.player[i];
                 if (p == null || !p.active || p.dead)
                     continue;
 
-                if (Vector2.Distance(boss.Center, p.Center) <= hitRange)
+                int existingIdx = FindTrueEyeForPlayer(i);
+                if (existingIdx == -1 && _state.TrueEyeSpawnCooldown <= 0)
                 {
-                    _hitByRapidDashOneDamageThisTick.Add(pIdx);
-                    TSPlayer tsPlayer = TShock.Players[pIdx];
-                    if (tsPlayer != null && tsPlayer.ConnectionAlive)
+                    int idx = NPC.NewNPC(
+                        NPC.GetBossSpawnSource(i),
+                        (int)(p.Center.X + 140f),
+                        (int)(p.Center.Y - 120f),
+                        NPCID.ServantofCthulhu,
+                        0,
+                        i,
+                        1f,
+                        0f,
+                        0f
+                    );
+
+                    if (idx >= 0 && idx < Main.maxNPCs)
                     {
-                        tsPlayer.DamagePlayer(1);
-                    }
-                    else if (p.statLife > 1)
-                    {
-                        p.statLife -= 1;
-                        NetMessage.SendData((int)PacketTypes.PlayerHP, -1, -1, null, pIdx);
-                    }
-                }
-            }
-        }
-
-        private bool HasAnyEyeBossInMap()
-        {
-            for (int i = 0; i < Main.maxNPCs; i++)
-            {
-                NPC npc = Main.npc[i];
-                if (npc != null && npc.active && npc.type == NPCID.EyeofCthulhu && npc.life > 0)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private bool IsNormalMonster(NPC npc)
-        {
-            if (npc == null || !npc.active)
-                return false;
-
-            if (npc.boss || npc.townNPC || npc.friendly)
-                return false;
-
-            if (npc.type == NPCID.MoonLordFreeEye || npc.type == NPCID.EyeofCthulhu)
-                return false;
-
-            // ยกเว้นลูกน้องของบอสให้ยังอยู่ได้
-            if (npc.type == NPCID.ServantofCthulhu)
-                return false;
-
-            return true;
-        }
-
-        private void SuppressNormalMonstersInMap()
-        {
-            for (int i = 0; i < Main.maxNPCs; i++)
-            {
-                NPC npc = Main.npc[i];
-                if (IsNormalMonster(npc))
-                {
-                    npc.active = false;
-                    NetMessage.SendData((int)PacketTypes.NpcUpdate, -1, -1, null, i);
-                }
-            }
-        }
-
-        private void CheckCloneLaserInstantKill()
-        {
-            _deadByLaserThisTick.Clear();
-
-            for (int i = 0; i < _activeLaserProjIndices.Count; i++)
-            {
-                int pIdx = _activeLaserProjIndices[i];
-                if (pIdx < 0 || pIdx >= Main.maxProjectiles)
-                    continue;
-
-                Projectile laser = Main.projectile[pIdx];
-                if (!laser.active || laser.type != ProjectileID.PhantasmalDeathray)
-                    continue;
-
-                Vector2 start = laser.Center;
-                float angle = laser.ai[1];
-                Vector2 dir = new Vector2((float)Math.Cos(angle), (float)Math.Sin(angle));
-                const float maxBeamLength = 2400f;
-                const float hitRadius = 38f;
-                Vector2 end = start + dir * maxBeamLength;
-
-                for (int plIdx = 0; plIdx < Main.maxPlayers; plIdx++)
-                {
-                    if (_deadByLaserThisTick.Contains(plIdx))
-                        continue;
-
-                    Player player = Main.player[plIdx];
-                    if (player == null || !player.active || player.dead)
-                        continue;
-
-                    float distToSegment = DistancePointToSegment(player.Center, start, end);
-                    if (distToSegment <= hitRadius + Math.Max(player.width, player.height) * 0.4f)
-                    {
-                        _deadByLaserThisTick.Add(plIdx);
-                        KillPlayerImmediately(plIdx, "โดนเลเซอร์ร่างโคลนของ Eye of Cthulhu ยิงทีเดียวตายทันที! >:(");
+                        NPC eye = Main.npc[idx];
+                        eye.lifeMax = 250;
+                        eye.life = 250;
+                        eye.damage = 28;
+                        eye.knockBackResist = 0.8f;
+                        eye.ai[0] = i;
+                        eye.ai[1] = 1f;
+                        _state.TrueEyeIndices.Add(idx);
+                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
+                        _state.TrueEyeSpawnCooldown = 30;
                     }
                 }
             }
-        }
 
-        private float DistancePointToSegment(Vector2 p, Vector2 a, Vector2 b)
-        {
-            Vector2 ab = b - a;
-            float lenSq = ab.LengthSquared();
-            if (lenSq <= 0.0001f)
-                return Vector2.Distance(p, a);
-
-            float t = Vector2.Dot(p - a, ab) / lenSq;
-            t = MathHelper.Clamp(t, 0f, 1f);
-            Vector2 closest = a + ab * t;
-            return Vector2.Distance(p, closest);
-        }
-
-        private void KillPlayerImmediately(int playerIndex, string reasonMessage)
-        {
-            Player player = Main.player[playerIndex];
-            if (player == null || !player.active || player.dead)
-                return;
-
-            TSPlayer tsPlayer = TShock.Players[playerIndex];
-            if (tsPlayer != null && tsPlayer.ConnectionAlive)
+            // อัปเดตการเคลื่อนที่ของ True Eye ให้ตามผู้เล่นแต่ละคน
+            List<int> aliveEyes = new List<int>();
+            foreach (int idx in _state.TrueEyeIndices)
             {
-                tsPlayer.KillPlayer();
-                tsPlayer.SendErrorMessage(reasonMessage);
-            }
-            else
-            {
-                player.KillMe(PlayerDeathReason.LegacyDefault(), 999999, 0, false);
-                NetMessage.SendPlayerDeath(playerIndex, PlayerDeathReason.LegacyDefault(), 999999, 0, false, -1, -1);
-            }
-        }
-
-        private void CheckMinecartInstantDeath()
-        {
-            for (int pIdx = 0; pIdx < Main.maxPlayers; pIdx++)
-            {
-                Player player = Main.player[pIdx];
-                if (player == null || !player.active || player.dead)
+                if (idx < 0 || idx >= Main.maxNPCs)
                     continue;
 
-                if (player.mount != null && player.mount.Active && player.mount.Cart)
+                NPC eye = Main.npc[idx];
+                if (!eye.active)
+                    continue;
+
+                int targetPlayerIdx = (int)eye.ai[0];
+                if (targetPlayerIdx >= 0 && targetPlayerIdx < Main.maxPlayers)
                 {
-                    player.mount.Dismount(player);
-                    NetMessage.SendData((int)PacketTypes.PlayerControls, -1, -1, null, pIdx);
-                    KillPlayerImmediately(pIdx, "ห้ามใช้รถราง! คุณตายทันที >:(");
+                    Player target = Main.player[targetPlayerIdx];
+                    if (target != null && target.active && !target.dead)
+                    {
+                        float angle = (float)(Main.GameUpdateCount * 0.05 + targetPlayerIdx * 1.3);
+                        Vector2 desiredOffset = new Vector2((float)Math.Cos(angle) * 150f, (float)Math.Sin(angle) * 110f - 40f);
+                        Vector2 desiredPos = target.Center + desiredOffset;
+                        Vector2 toDesired = desiredPos - eye.Center;
+                        eye.velocity = Vector2.Lerp(eye.velocity, toDesired * 0.08f, 0.25f);
+                        if (eye.velocity.Length() > 11f)
+                            eye.velocity = Vector2.Normalize(eye.velocity) * 11f;
+
+                        eye.direction = target.Center.X >= eye.Center.X ? 1 : -1;
+                        eye.spriteDirection = eye.direction;
+                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
+                    }
                 }
+                aliveEyes.Add(idx);
             }
+            _state.TrueEyeIndices = aliveEyes;
         }
 
-        private void StartUltimatePhase(NPC triggeringBoss)
+        private int FindTrueEyeForPlayer(int playerIndex)
         {
-            RemoveAllPhantasmalSpheres();
-
-            Vector2 sumPos = Vector2.Zero;
-            int aliveCount = 0;
-            float maxBottomY = float.MinValue;
-
-            for (int pIdx = 0; pIdx < Main.maxPlayers; pIdx++)
+            foreach (int idx in _state.TrueEyeIndices)
             {
-                Player p = Main.player[pIdx];
+                if (idx >= 0 && idx < Main.maxNPCs)
+                {
+                    NPC eye = Main.npc[idx];
+                    if (eye.active && (int)eye.ai[0] == playerIndex)
+                        return idx;
+                }
+            }
+            return -1;
+        }
+
+        private Vector2 GetAlivePlayersCenter()
+        {
+            Vector2 sum = Vector2.Zero;
+            int count = 0;
+            for (int i = 0; i < Main.maxPlayers; i++)
+            {
+                Player p = Main.player[i];
                 if (p != null && p.active && !p.dead)
                 {
-                    sumPos += p.position;
-                    aliveCount++;
-                    float standY = FindGroundStandingY(p);
-                    if (standY > maxBottomY)
-                        maxBottomY = standY;
+                    sum += p.Center;
+                    count++;
                 }
             }
+            return count > 0 ? (sum / count) : Main.npc[_state.BossNpcIndex].Center;
+        }
 
-            if (aliveCount > 0)
+        private void LockHorizontalMovementForPlayers(bool enable)
+        {
+            for (int i = 0; i < Main.maxPlayers; i++)
             {
-                _ultimateGatherPoint = sumPos / aliveCount;
-                _groundStandY = maxBottomY > float.MinValue ? maxBottomY : (_ultimateGatherPoint.Y + 42f);
-            }
-            else if (triggeringBoss != null && triggeringBoss.active)
-            {
-                _ultimateGatherPoint = triggeringBoss.position;
-                _groundStandY = _ultimateGatherPoint.Y + 80f;
-            }
+                Player p = Main.player[i];
+                if (p == null || !p.active || p.dead)
+                    continue;
 
-            for (int pIdx = 0; pIdx < Main.maxPlayers; pIdx++)
-            {
-                Player p = Main.player[pIdx];
-                if (p != null && p.active && !p.dead)
+                if (enable)
                 {
-                    p.position = _ultimateGatherPoint;
+                    if (!_lockedXByPlayer.ContainsKey(i))
+                        _lockedXByPlayer[i] = p.position.X;
+
+                    p.position.X = _lockedXByPlayer[i];
                     p.velocity.X = 0f;
-                    NetMessage.SendData((int)PacketTypes.PlayerControls, -1, -1, null, pIdx);
+                    // คงความสามารถกระโดด (velocity.Y ไม่ถูกบล็อกแนวตั้ง)
+                    TSPlayer.All.SendData(PacketTypes.PlayerControls, "", i);
+                }
+                else
+                {
+                    _lockedXByPlayer.Remove(i);
                 }
             }
+        }
 
-            HideOriginalBosses(true);
+        private void RunUltimateSequence(NPC boss)
+        {
+            _state.StageTicks++;
+            Vector2 groupCenter = GetAlivePlayersCenter();
 
-            _isUltimatePhaseActive = true;
-            _ultimateTimerTicks = 0;
-            _dualClo
+            switch (_state.Stage)
+            {
+                case UltStage.PullAndLock:
+                {
+                    // ดึงผู้เล่นรวมจุดกึ่งกลางและล็อกการเดินซ้ายขวา (ยังกระโดดได้)
+                    for (int i = 0; i < Main.maxPlayers; i++)
+                    {
+                        Player p = Main.player[i];
+                        if (p != null && p.active && !p.dead)
+                        {
+                            Vector2 pullDir = groupCenter - p.Center;
+                            if (pullDir.Length() > 24f)
+                            {
+                                p.velocity.X = MathHelper.Clamp(pullDir.X * 0.18f, -12f, 12f);
+                            }
+                            else
+                            {
+                                p.velocity.X = 0f;
+                            }
+                        }
+                    }
+
+                    // ซ่อนบอสจริง
+                    boss.dontTakeDamage = true;
+                    boss.alpha = 255;
+                    boss.velocity = Vector2.Zero;
+                    boss.Center = groupCenter + new Vector2(0f, -450f);
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
+
+                    if (_state.StageTicks >= 45)
+                    {
+                        for (int i = 0; i < Main.maxPlayers; i++)
+                        {
+                            Player p = Main.player[i];
+                            if (p != null && p.active && !p.dead)
+                                _lockedXByPlayer[i] = p.position.X;
+                        }
+
+                        SpawnClonesAroundPlayers(groupCenter, 4);
+                        _state.Stage = UltStage.CloneLaser2s;
+                        _state.StageTicks = 0;
+                    }
+                    break;
+                }
+
+                case UltStage.CloneLaser2s:
+                {
+                    // ห้ามเดินซ้ายขวาแต่กระโดดได้ + บอสจริงถูกซ่อน
+                    LockHorizontalMovementForPlayers(true);
+                    boss.dontTakeDamage = true;
+                    boss.alpha = 255;
+                    boss.velocity = Vector2.Zero;
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
+
+                    // ร่างโคลนยิงเลเซอร์ตรงตามทิศทางที่มอง นาน 2 วินาที (120 ticks)
+                    FireCloneLasersAlongFacing(groupCenter);
+
+                    if (_state.StageTicks >= 120)
+                    {
+                        KeepOnlyTopRightClone(groupCenter);
+                        _state.Stage = UltStage.TopRightClone3s;
+                        _state.StageTicks = 0;
+                    }
+                    break;
+                }
+
+                case UltStage.TopRightClone3s:
+                {
+                    // เหลือโคลนตัวเดียวขวาบน ยิงจากด้านในจับเวลา 3 วินาที (180 ticks)
+                    LockHorizontalMovementForPlayers(true);
+                    boss.dontTakeDamage = true;
+                    boss.alpha = 255;
+                    boss.velocity = Vector2.Zero;
+
+                    if (_state.CloneIndices.Count > 0)
+                    {
+                        int cloneIdx = _state.CloneIndices[0];
+                        if (cloneIdx >= 0 && cloneIdx < Main.maxNPCs && Main.npc[cloneIdx].active)
+                        {
+                            NPC clone = Main.npc[cloneIdx];
+                            Vector2 topRightInside = groupCenter + new Vector2(220f, -180f);
+                            clone.Center = Vector2.Lerp(clone.Center, topRightInside, 0.25f);
+                            clone.velocity = Vector2.Zero;
+                            clone.direction = -1;
+                            clone.spriteDirection = -1;
+                            TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", cloneIdx);
+
+                            if (_state.StageTicks % 20 == 0)
+                            {
+                                FireSingleLaserFromClone(clone, new Vector2(-0.75f, 0.66f));
+                            }
+                        }
+                    }
+
+                    if (_state.StageTicks >= 180)
+                    {
+                        CleanupClonesAndEyes();
+                        LockHorizontalMovementForPlayers(false);
+
+                        // เผยตัวบอสจริงและพุ่งไล่ผู้เล่นแบบ UFO ความเร็วสูงระดับรองเท้าวิ่งเร็วระดับสูง 10 วินาที (600 ticks) โดยไม่ยิงก
