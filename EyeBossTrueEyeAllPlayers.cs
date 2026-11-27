@@ -13,7 +13,7 @@ namespace EyeBossTrueEyeAllPlayers
     {
         public override string Name => "EyeBossTrueEyeAllPlayers";
         public override string Author => "Shokuya";
-        public override string Description => "Eye of Cthulhu rework with True Eye for all players and 10% ultimate sequence.";
+        public override string Description => "Eye of Cthulhu rework with True Eye above players, 10s Phantasmal Sphere with 5s warning, and 10% ultimate sequence.";
         public override Version Version => new Version(1, 0, 0, 0);
 
         private enum UltStage
@@ -27,6 +27,15 @@ namespace EyeBossTrueEyeAllPlayers
             SurrenderIdle = 6
         }
 
+        private class SphereAttackState
+        {
+            public int ProjectileIndex = -1;
+            public int TargetPlayerIndex = -1;
+            public int TelegraphTicks = 0; // 300 ticks = 5 วินาทีเตือน
+            public bool HasFired = false;
+            public Vector2 AimDirection = Vector2.Zero;
+        }
+
         private class BossState
         {
             public int BossNpcIndex = -1;
@@ -35,8 +44,9 @@ namespace EyeBossTrueEyeAllPlayers
             public UltStage Stage = UltStage.None;
             public int StageTicks = 0;
             public List<int> CloneIndices = new List<int>();
-            public List<int> TrueEyeIndices = new List<int>();
-            public int TrueEyeSpawnCooldown = 0;
+            public Dictionary<int, int> TrueEyeByPlayer = new Dictionary<int, int>();
+            public Dictionary<int, int> SphereCycleTicksByPlayer = new Dictionary<int, int>(); // 600 ticks = 10 วินาที
+            public List<SphereAttackState> ActiveSpheres = new List<SphereAttackState>();
             public Vector2 SurrenderPos = Vector2.Zero;
         }
 
@@ -94,10 +104,12 @@ namespace EyeBossTrueEyeAllPlayers
             if (_state.BossNpcIndex == -1)
             {
                 CleanupClonesAndEyes();
+                CleanupPhantasmalSpheres();
                 _state.Phase2Triggered = false;
                 _state.UltTriggered = false;
                 _state.Stage = UltStage.None;
                 _state.StageTicks = 0;
+                _state.SphereCycleTicksByPlayer.Clear();
                 _lockedXByPlayer.Clear();
                 _cartDeathHandled.Clear();
             }
@@ -115,15 +127,38 @@ namespace EyeBossTrueEyeAllPlayers
             }
             _state.CloneIndices.Clear();
 
-            foreach (int idx in _state.TrueEyeIndices)
+            foreach (var kv in _state.TrueEyeByPlayer)
             {
+                int idx = kv.Value;
                 if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
                 {
                     Main.npc[idx].active = false;
                     TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
                 }
             }
-            _state.TrueEyeIndices.Clear();
+            _state.TrueEyeByPlayer.Clear();
+        }
+
+        private void CleanupPhantasmalSpheres()
+        {
+            foreach (var s in _state.ActiveSpheres)
+            {
+                if (s.ProjectileIndex >= 0 && s.ProjectileIndex < Main.maxProjectiles)
+                {
+                    Projectile proj = Main.projectile[s.ProjectileIndex];
+                    if (proj.active)
+                    {
+                        proj.Kill();
+                        NetMessage.SendData(29, -1, -1, null, s.ProjectileIndex, proj.owner);
+                    }
+                }
+            }
+            _state.ActiveSpheres.Clear();
+        }
+
+        private bool IsManagedEye(int npcId)
+        {
+            return _state.CloneIndices.Contains(npcId) || _state.TrueEyeByPlayer.ContainsValue(npcId);
         }
 
         private void OnNpcSpawn(NpcSpawnEventArgs args)
@@ -148,8 +183,7 @@ namespace EyeBossTrueEyeAllPlayers
                 spawned.type == NPCID.Retinazer ||
                 spawned.type == NPCID.Spazmatism ||
                 spawned.boss ||
-                _state.CloneIndices.Contains(args.NpcId) ||
-                _state.TrueEyeIndices.Contains(args.NpcId);
+                IsManagedEye(args.NpcId);
 
             if (!isAllowedNpc)
             {
@@ -208,23 +242,19 @@ namespace EyeBossTrueEyeAllPlayers
                 return;
             }
 
+            // ฟื้นเลือดเต็มแค่รอบเดียวตอนเข้าเฟส 2
             if (!_state.Phase2Triggered && (boss.ai[0] >= 1f || boss.life <= boss.lifeMax / 2))
             {
                 _state.Phase2Triggered = true;
                 boss.life = boss.lifeMax;
                 TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
-                TSPlayer.All.SendInfoMessage("Eye of Cthulhu เข้าสู่เฟส 2 และฟื้นฟูพลังชีวิต 100% ถาวร!");
+                TSPlayer.All.SendInfoMessage("Eye of Cthulhu เข้าสู่เฟส 2 และฟื้นฟูพลังชีวิต 1 ครั้ง!");
             }
 
             if (_state.Phase2Triggered)
             {
-                if (boss.life < boss.lifeMax)
-                {
-                    boss.life = boss.lifeMax;
-                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
-                }
-
-                MaintainTrueEyesForAllPlayers(boss);
+                MaintainTrueEyesAbovePlayers();
+                UpdatePhantasmalSphereAttacks();
             }
 
             if (!_state.UltTriggered && boss.life <= boss.lifeMax * 0.10f)
@@ -240,6 +270,220 @@ namespace EyeBossTrueEyeAllPlayers
             {
                 RunUltimateSequence(boss);
             }
+        }
+
+        private void MaintainTrueEyesAbovePlayers()
+        {
+            const int tenSecondsTicks = 600; // 60 ticks/sec * 10 sec
+
+            // ลบ True Eye ของผู้เล่นที่ตายหรือออกจากเกม
+            List<int> toRemovePlayers = new List<int>();
+            foreach (var kv in _state.TrueEyeByPlayer)
+            {
+                int plrIdx = kv.Key;
+                int eyeIdx = kv.Value;
+                Player p = (plrIdx >= 0 && plrIdx < Main.maxPlayers) ? Main.player[plrIdx] : null;
+                bool playerAlive = p != null && p.active && !p.dead;
+
+                if (!playerAlive)
+                {
+                    if (eyeIdx >= 0 && eyeIdx < Main.maxNPCs && Main.npc[eyeIdx].active)
+                    {
+                        Main.npc[eyeIdx].active = false;
+                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", eyeIdx);
+                    }
+                    toRemovePlayers.Add(plrIdx);
+                }
+            }
+            foreach (int plrIdx in toRemovePlayers)
+            {
+                _state.TrueEyeByPlayer.Remove(plrIdx);
+                _state.SphereCycleTicksByPlayer.Remove(plrIdx);
+            }
+
+            for (int i = 0; i < Main.maxPlayers; i++)
+            {
+                Player p = Main.player[i];
+                if (p == null || !p.active || p.dead)
+                    continue;
+
+                int eyeIdx = -1;
+                if (!_state.TrueEyeByPlayer.TryGetValue(i, out eyeIdx) ||
+                    eyeIdx < 0 || eyeIdx >= Main.maxNPCs || !Main.npc[eyeIdx].active)
+                {
+                    // เสก True Eye (ใช้ ServantofCthulhu และปรับสเกลให้เป็น True Eye) เหนือหัวผู้เล่น
+                    int createdIdx = NPC.NewNPC(
+                        NPC.GetBossSpawnSource(i),
+                        (int)p.Center.X,
+                        (int)(p.Center.Y - 120f),
+                        NPCID.ServantofCthulhu,
+                        0,
+                        i,
+                        1f,
+                        0f,
+                        0f
+                    );
+
+                    if (createdIdx >= 0 && createdIdx < Main.maxNPCs)
+                    {
+                        NPC eye = Main.npc[createdIdx];
+                        eye.lifeMax = 350;
+                        eye.life = 350;
+                        eye.damage = 30;
+                        eye.scale = 1.45f;
+                        eye.noGravity = true;
+                        eye.noTileCollide = true;
+                        eye.knockBackResist = 0.85f;
+                        eye.ai[0] = i;
+                        _state.TrueEyeByPlayer[i] = createdIdx;
+                        if (!_state.SphereCycleTicksByPlayer.ContainsKey(i))
+                            _state.SphereCycleTicksByPlayer[i] = 0;
+
+                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", createdIdx);
+                        eyeIdx = createdIdx;
+                    }
+                }
+
+                if (eyeIdx >= 0 && eyeIdx < Main.maxNPCs && Main.npc[eyeIdx].active)
+                {
+                    NPC eye = Main.npc[eyeIdx];
+                    float bob = (float)Math.Sin(Main.GameUpdateCount * 0.08 + i) * 10f;
+                    Vector2 aboveHeadPos = p.Center + new Vector2(0f, -115f + bob);
+                    Vector2 toAbove = aboveHeadPos - eye.Center;
+
+                    eye.velocity = toAbove * 0.25f;
+                    eye.Center += eye.velocity;
+                    eye.velocity = Vector2.Zero;
+                    eye.noGravity = true;
+                    eye.noTileCollide = true;
+                    eye.direction = p.Center.X >= eye.Center.X ? 1 : -1;
+                    eye.spriteDirection = eye.direction;
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", eyeIdx);
+
+                    // นับรอบทุกๆ 10 วินาที (600 ticks) เพื่อเสก Phantasmal Sphere
+                    int cycle = _state.SphereCycleTicksByPlayer.TryGetValue(i, out int curTick) ? curTick + 1 : 1;
+                    if (cycle >= tenSecondsTicks)
+                    {
+                        cycle = 0;
+                        SpawnPhantasmalSphereFromEye(eye, p, i);
+                    }
+                    _state.SphereCycleTicksByPlayer[i] = cycle;
+                }
+            }
+        }
+
+        private void SpawnPhantasmalSphereFromEye(NPC eye, Player target, int targetPlayerIndex)
+        {
+            Vector2 spawnPos = eye.Center + new Vector2(0f, -24f);
+            Vector2 dirToPlayer = target.Center - spawnPos;
+            if (dirToPlayer.Length() < 0.01f)
+                dirToPlayer = new Vector2(0f, 1f);
+            else
+                dirToPlayer.Normalize();
+
+            int projIdx = Projectile.NewProjectile(
+                NPC.GetBossSpawnSource(targetPlayerIndex),
+                spawnPos,
+                Vector2.Zero,
+                ProjectileID.PhantasmalSphere,
+                32,
+                0f,
+                Main.myPlayer
+            );
+
+            if (projIdx >= 0 && projIdx < Main.maxProjectiles)
+            {
+                Projectile proj = Main.projectile[projIdx];
+                proj.hostile = true;
+                proj.friendly = false;
+                proj.tileCollide = false;
+                proj.timeLeft = 900;
+                TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", projIdx);
+
+                _state.ActiveSpheres.Add(new SphereAttackState
+                {
+                    ProjectileIndex = projIdx,
+                    TargetPlayerIndex = targetPlayerIndex,
+                    TelegraphTicks = 0,
+                    HasFired = false,
+                    AimDirection = dirToPlayer
+                });
+
+                TShock.Players[targetPlayerIndex]?.SendWarningMessage("True Eye เตรียมยิง Phantasmal Sphere ใน 5 วินาที!");
+            }
+        }
+
+        private void UpdatePhantasmalSphereAttacks()
+        {
+            const int fiveSecondsWarningTicks = 300; // 60 ticks/sec * 5 sec
+            const float shootSpeed = 16.5f;
+
+            List<SphereAttackState> remaining = new List<SphereAttackState>();
+
+            foreach (var s in _state.ActiveSpheres)
+            {
+                if (s.ProjectileIndex < 0 || s.ProjectileIndex >= Main.maxProjectiles)
+                    continue;
+
+                Projectile proj = Main.projectile[s.ProjectileIndex];
+                if (!proj.active || proj.type != ProjectileID.PhantasmalSphere)
+                    continue;
+
+                Player target = (s.TargetPlayerIndex >= 0 && s.TargetPlayerIndex < Main.maxPlayers)
+                    ? Main.player[s.TargetPlayerIndex]
+                    : null;
+
+                if (!s.HasFired)
+                {
+                    s.TelegraphTicks++;
+
+                    // ช่วงเตือน 5 วินาที: ลอยค้างเหนือหัว/หน้า True Eye เพื่อเตือนผู้เล่นและอัปเดตทิศเล็ง
+                    if (target != null && target.active && !target.dead)
+                    {
+                        Vector2 hoverAnchor = target.Center + new Vector2(0f, -155f);
+                        Vector2 toAnchor = hoverAnchor - proj.Center;
+                        proj.velocity = toAnchor * 0.2f;
+                        proj.Center += proj.velocity;
+                        proj.velocity = Vector2.Zero;
+
+                        Vector2 aim = target.Center - proj.Center;
+                        if (aim.Length() > 0.01f)
+                        {
+                            aim.Normalize();
+                            s.AimDirection = aim;
+                        }
+                    }
+
+                    proj.timeLeft = 600;
+                    TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", s.ProjectileIndex);
+
+                    // ครบ 5 วินาที -> ยิงพุ่งใส่ผู้เล่น
+                    if (s.TelegraphTicks >= fiveSecondsWarningTicks)
+                    {
+                        s.HasFired = true;
+                        Vector2 launchDir = s.AimDirection.LengthSquared() > 0.001f
+                            ? s.AimDirection
+                            : new Vector2(0f, 1f);
+
+                        proj.velocity = launchDir * shootSpeed;
+                        proj.timeLeft = 240;
+                        TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", s.ProjectileIndex);
+                    }
+                }
+                else
+                {
+                    // หลังยิงแล้ว ให้พุ่งต่อเนื่องไปตามทิศที่เล็งไว้
+                    Vector2 launchDir = s.AimDirection.LengthSquared() > 0.001f
+                        ? s.AimDirection
+                        : new Vector2(0f, 1f);
+                    proj.velocity = launchDir * shootSpeed;
+                    TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", s.ProjectileIndex);
+                }
+
+                remaining.Add(s);
+            }
+
+            _state.ActiveSpheres = remaining;
         }
 
         private void EnforceMinecartInstantKill()
@@ -274,7 +518,7 @@ namespace EyeBossTrueEyeAllPlayers
         {
             for (int i = 0; i < Main.maxNPCs; i++)
             {
-                if (i == _state.BossNpcIndex || _state.CloneIndices.Contains(i) || _state.TrueEyeIndices.Contains(i))
+                if (i == _state.BossNpcIndex || IsManagedEye(i))
                     continue;
 
                 NPC npc = Main.npc[i];
@@ -290,96 +534,6 @@ namespace EyeBossTrueEyeAllPlayers
                     TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", i);
                 }
             }
-        }
-
-        private void MaintainTrueEyesForAllPlayers(NPC boss)
-        {
-            if (_state.TrueEyeSpawnCooldown > 0)
-                _state.TrueEyeSpawnCooldown--;
-
-            for (int i = 0; i < Main.maxPlayers; i++)
-            {
-                Player p = Main.player[i];
-                if (p == null || !p.active || p.dead)
-                    continue;
-
-                int existingIdx = FindTrueEyeForPlayer(i);
-                if (existingIdx == -1 && _state.TrueEyeSpawnCooldown <= 0)
-                {
-                    int idx = NPC.NewNPC(
-                        NPC.GetBossSpawnSource(i),
-                        (int)(p.Center.X + 140f),
-                        (int)(p.Center.Y - 120f),
-                        NPCID.ServantofCthulhu,
-                        0,
-                        i,
-                        1f,
-                        0f,
-                        0f
-                    );
-
-                    if (idx >= 0 && idx < Main.maxNPCs)
-                    {
-                        NPC eye = Main.npc[idx];
-                        eye.lifeMax = 250;
-                        eye.life = 250;
-                        eye.damage = 28;
-                        eye.knockBackResist = 0.8f;
-                        eye.ai[0] = i;
-                        eye.ai[1] = 1f;
-                        _state.TrueEyeIndices.Add(idx);
-                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
-                        _state.TrueEyeSpawnCooldown = 30;
-                    }
-                }
-            }
-
-            List<int> aliveEyes = new List<int>();
-            foreach (int idx in _state.TrueEyeIndices)
-            {
-                if (idx < 0 || idx >= Main.maxNPCs)
-                    continue;
-
-                NPC eye = Main.npc[idx];
-                if (!eye.active)
-                    continue;
-
-                int targetPlayerIdx = (int)eye.ai[0];
-                if (targetPlayerIdx >= 0 && targetPlayerIdx < Main.maxPlayers)
-                {
-                    Player target = Main.player[targetPlayerIdx];
-                    if (target != null && target.active && !target.dead)
-                    {
-                        float angle = (float)(Main.GameUpdateCount * 0.05 + targetPlayerIdx * 1.3);
-                        Vector2 desiredOffset = new Vector2((float)Math.Cos(angle) * 150f, (float)Math.Sin(angle) * 110f - 40f);
-                        Vector2 desiredPos = target.Center + desiredOffset;
-                        Vector2 toDesired = desiredPos - eye.Center;
-                        eye.velocity = Vector2.Lerp(eye.velocity, toDesired * 0.08f, 0.25f);
-                        if (eye.velocity.Length() > 11f)
-                            eye.velocity = Vector2.Normalize(eye.velocity) * 11f;
-
-                        eye.direction = target.Center.X >= eye.Center.X ? 1 : -1;
-                        eye.spriteDirection = eye.direction;
-                        TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
-                    }
-                }
-                aliveEyes.Add(idx);
-            }
-            _state.TrueEyeIndices = aliveEyes;
-        }
-
-        private int FindTrueEyeForPlayer(int playerIndex)
-        {
-            foreach (int idx in _state.TrueEyeIndices)
-            {
-                if (idx >= 0 && idx < Main.maxNPCs)
-                {
-                    NPC eye = Main.npc[idx];
-                    if (eye.active && (int)eye.ai[0] == playerIndex)
-                        return idx;
-                }
-            }
-            return -1;
         }
 
         private Vector2 GetAlivePlayersCenter()
@@ -584,6 +738,7 @@ namespace EyeBossTrueEyeAllPlayers
                         _state.StageTicks = 0;
                         _state.SurrenderPos = boss.Center;
                         CleanupClonesAndEyes();
+                        CleanupPhantasmalSpheres();
                         LockHorizontalMovementForPlayers(false);
                         TSPlayer.All.SendSuccessMessage("Eye of Cthulhu ยอมแพ้แล้ว!");
                     }
