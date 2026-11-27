@@ -17,6 +17,10 @@
       <HintPath>OTAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="TerrariaServer">
+      <HintPath>TerrariaServer.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="TShockAPI">
       <HintPath>TShockAPI.dll</HintPath>
       <Private>false</Private>
