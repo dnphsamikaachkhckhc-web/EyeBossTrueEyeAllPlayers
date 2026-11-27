@@ -17,8 +17,16 @@
       <HintPath>$(MSBuildProjectDirectory)/TerrariaServer.exe</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="TerrariaServerDll" Condition="Exists('$(MSBuildProjectDirectory)/TerrariaServer.dll')">
+      <HintPath>$(MSBuildProjectDirectory)/TerrariaServer.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="TShockAPI">
       <HintPath>$(MSBuildProjectDirectory)/TShockAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Xna.Framework" Condition="Exists('$(MSBuildProjectDirectory)/Microsoft.Xna.Framework.dll')">
+      <HintPath>$(MSBuildProjectDirectory)/Microsoft.Xna.Framework.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
