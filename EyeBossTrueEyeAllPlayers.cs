@@ -212,7 +212,7 @@ namespace EyeBossTrueEyeAllPlayers
             {
                 _state.Phase2Triggered = true;
                 boss.life = boss.lifeMax;
-                TSPlayer.All.SendData(PacketTypes.NPCProjDestroy, "", boss.whoAmI);
+                TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
                 TSPlayer.All.SendInfoMessage("Eye of Cthulhu เข้าสู่เฟส 2 และฟื้นฟูพลังชีวิต 100% ถาวร!");
             }
 
@@ -221,7 +221,7 @@ namespace EyeBossTrueEyeAllPlayers
                 if (boss.life < boss.lifeMax)
                 {
                     boss.life = boss.lifeMax;
-                    TSPlayer.All.SendData(PacketTypes.NPCProjDestroy, "", boss.whoAmI);
+                    TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
                 }
 
                 MaintainTrueEyesForAllPlayers(boss);
