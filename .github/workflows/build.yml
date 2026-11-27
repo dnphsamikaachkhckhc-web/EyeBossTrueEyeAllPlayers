@@ -17,8 +17,11 @@ jobs:
         with:
           dotnet-version: '6.0.x'
 
-      - name: Download OTAPI.dll
-        run: curl -fL "https://github.com/dnphsamikaachkhckhc-web/EyeBossTrueEyeAllPlayers/releases/download/1.0/OTAPI.dll" -o OTAPI.dll
+      - name: Download Server & TShock DLLs
+        run: |
+          curl -fL "https://github.com/dnphsamikaachkhckhc-web/EyeBossTrueEyeAllPlayers/releases/download/1.0/OTAPI.dll" -o OTAPI.dll
+          curl -fL "https://github.com/dnphsamikaachkhckhc-web/EyeBossTrueEyeAllPlayers/releases/download/1.0/TerrariaServer.dll" -o TerrariaServer.dll
+          curl -fL "https://github.com/dnphsamikaachkhckhc-web/EyeBossTrueEyeAllPlayers/releases/download/1.0/TShockAPI.dll" -o TShockAPI.dll
 
       - name: Restore and Build DLL
         run: dotnet build EyeBossTrueEyeAllPlayers.csproj -c Release -o out
