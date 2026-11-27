@@ -4,15 +4,21 @@
     <OutputType>Library</OutputType>
     <AssemblyName>EyeBossTrueEyeAllPlayers</AssemblyName>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="TerrariaServer">
-      <HintPath>TerrariaServer.exe</HintPath>
+      <HintPath Condition="Exists('TerrariaServer.exe')">TerrariaServer.exe</HintPath>
+      <HintPath Condition="Exists('terrariaserver.exe')">terrariaserver.exe</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="TShockAPI">
-      <HintPath>TShockAPI.dll</HintPath>
+      <HintPath Condition="Exists('TShockAPI.dll')">TShockAPI.dll</HintPath>
+      <HintPath Condition="Exists('tshockapi.dll')">tshockapi.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="*.dll" Exclude="EyeBossTrueEyeAllPlayers.dll">
       <Private>false</Private>
     </Reference>
   </ItemGroup>
