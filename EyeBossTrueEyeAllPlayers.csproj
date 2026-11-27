@@ -5,15 +5,20 @@
     <AssemblyName>EyeBossTrueEyeAllPlayers</AssemblyName>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="EyeBossTrueEyeAllPlayers.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="TerrariaServer">
-      <HintPath>TerrariaServer.exe</HintPath>
+      <HintPath>$(MSBuildProjectDirectory)/TerrariaServer.exe</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="TShockAPI">
-      <HintPath>TShockAPI.dll</HintPath>
+      <HintPath>$(MSBuildProjectDirectory)/TShockAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
