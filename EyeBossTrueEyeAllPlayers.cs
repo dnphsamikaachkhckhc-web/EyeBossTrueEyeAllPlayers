@@ -154,7 +154,7 @@ namespace EyeBossTrueEyeAllPlayers
             if (!isAllowedNpc)
             {
                 spawned.active = false;
-                spawned.netSkip = -1;
+                NetMessage.SendData(23, -1, -1, null, args.NpcId);
                 TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", args.NpcId);
                 args.Handled = true;
             }
@@ -176,7 +176,7 @@ namespace EyeBossTrueEyeAllPlayers
             if (args.Handled || !IsBossActive())
                 return;
 
-            if (args.MsgID == PacketTypes.PlayerSpawn || args.MsgID == PacketTypes.PlayerControls)
+            if (args.MsgID == PacketTypes.PlayerSpawn || args.MsgID == PacketTypes.PlayerUpdate)
             {
                 int plrIdx = args.Msg.whoAmI;
                 if (plrIdx >= 0 && plrIdx < Main.maxPlayers && _lockedXByPlayer.ContainsKey(plrIdx))
@@ -212,7 +212,7 @@ namespace EyeBossTrueEyeAllPlayers
             {
                 _state.Phase2Triggered = true;
                 boss.life = boss.lifeMax;
-                TSPlayer.All.SendData(PacketTypes.NpcHP, "", boss.whoAmI);
+                TSPlayer.All.SendData(PacketTypes.NPCProjDestroy, "", boss.whoAmI);
                 TSPlayer.All.SendInfoMessage("Eye of Cthulhu เข้าสู่เฟส 2 และฟื้นฟูพลังชีวิต 100% ถาวร!");
             }
 
@@ -221,7 +221,7 @@ namespace EyeBossTrueEyeAllPlayers
                 if (boss.life < boss.lifeMax)
                 {
                     boss.life = boss.lifeMax;
-                    TSPlayer.All.SendData(PacketTypes.NpcHP, "", boss.whoAmI);
+                    TSPlayer.All.SendData(PacketTypes.NPCProjDestroy, "", boss.whoAmI);
                 }
 
                 MaintainTrueEyesForAllPlayers(boss);
@@ -253,7 +253,6 @@ namespace EyeBossTrueEyeAllPlayers
 
                 bool ridingMinecart = p.mount.Active &&
                     (p.mount.Type == MountID.Minecart ||
-                     p.mount.Type == MountID.WoodMinecart ||
                      p.mount.Type == MountID.MinecartMech ||
                      p.mount.Type == MountID.MeowmereMinecart);
 
@@ -414,7 +413,7 @@ namespace EyeBossTrueEyeAllPlayers
 
                     p.position.X = _lockedXByPlayer[i];
                     p.velocity.X = 0f;
-                    TSPlayer.All.SendData(PacketTypes.PlayerControls, "", i);
+                    TSPlayer.All.SendData(PacketTypes.PlayerUpdate, "", i);
                 }
                 else
                 {
@@ -550,7 +549,6 @@ namespace EyeBossTrueEyeAllPlayers
                     }
 
                     boss.ai[0] = 3f;
-                    boss.ai[1] = 0f;
                     TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
 
                     if (_state.StageTicks >= 600)
@@ -568,29 +566,44 @@ namespace EyeBossTrueEyeAllPlayers
                     boss.noTileCollide = true;
                     boss.damage = 1;
 
-                    if (_state.StageTicks % 18 == 0)
+                    Vector2 toTarget = groupCenter - boss.Center;
+                    if (toTarget.Length() > 1f)
                     {
-                        Vector2 dir = groupCenter - boss.Center;
-                        if (dir.Length() > 1f)
-                        {
-                            boss.velocity = Vector2.Normalize(dir) * 24f;
-                            boss.direction = boss.velocity.X >= 0f ? 1 : -1;
-                            boss.spriteDirection = boss.direction;
-                        }
+                        Vector2 dir = Vector2.Normalize(toTarget);
+                        float dashSpeed = 28f;
+                        boss.velocity = Vector2.Lerp(boss.velocity, dir * dashSpeed, 0.25f);
+                        boss.direction = dir.X >= 0f ? 1 : -1;
+                        boss.spriteDirection = boss.direction;
                     }
 
                     TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
 
                     if (_state.StageTicks >= 300)
                     {
-                        _state.SurrenderPos = groupCenter + new Vector2(0f, -80f);
                         _state.Stage = UltStage.SurrenderIdle;
                         _state.StageTicks = 0;
-                        TSPlayer.All.SendSuccessMessage("Eye of Cthulhu ยอมแพ้แล้วและหยุดนิ่งอยู่ตรงหน้าคุณ!");
+                        _state.SurrenderPos = boss.Center;
+                        CleanupClonesAndEyes();
+                        LockHorizontalMovementForPlayers(false);
+                        TSPlayer.All.SendSuccessMessage("Eye of Cthulhu ยอมแพ้แล้ว!");
                     }
                     break;
                 }
+
+                case UltStage.SurrenderIdle:
+                {
+                    HandleSurrenderIdle(boss);
+                    break;
+                }
             }
+        }
+
+        private void HandleSurrenderIdle(NPC boss)
+        {
+            boss.dontTakeDamage = true;
+            boss.velocity = Vector2.Zero;
+            boss.Center = _state.SurrenderPos;
+            TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
         }
 
         private void SpawnClonesAroundPlayers(Vector2 center, int count)
@@ -599,71 +612,91 @@ namespace EyeBossTrueEyeAllPlayers
             for (int i = 0; i < count; i++)
             {
                 double angle = (Math.PI * 2.0 / count) * i;
-                Vector2 offset = new Vector2((float)Math.Cos(angle) * 260f, (float)Math.Sin(angle) * 180f - 40f);
-                Vector2 spawnPos = center + offset;
+                int x = (int)(center.X + Math.Cos(angle) * 240.0);
+                int y = (int)(center.Y + Math.Sin(angle) * 180.0);
 
-                int idx = NPC.NewNPC(
-                    NPC.GetBossSpawnSource(0),
-                    (int)spawnPos.X,
-                    (int)spawnPos.Y,
-                    NPCID.EyeofCthulhu,
-                    0,
-                    0f,
-                    0f,
-                    0f,
-                    0f
-                );
-
+                int idx = NPC.NewNPC(NPC.GetBossSpawnSource(-1), x, y, NPCID.ServantofCthulhu, 0);
                 if (idx >= 0 && idx < Main.maxNPCs)
                 {
                     NPC clone = Main.npc[idx];
-                    clone.lifeMax = 1000;
-                    clone.life = 1000;
-                    clone.damage = 9999;
-                    clone.dontTakeDamage = true;
+                    clone.lifeMax = 500;
+                    clone.life = 500;
+                    clone.damage = 25;
                     clone.noTileCollide = true;
-                    clone.direction = spawnPos.X >= center.X ? -1 : 1;
-                    clone.spriteDirection = clone.direction;
                     _state.CloneIndices.Add(idx);
                     TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
                 }
             }
         }
 
-        private void FireCloneLasersAlongFacing(Vector2 groupCenter)
+        private void FireCloneLasersAlongFacing(Vector2 targetCenter)
         {
+            if (_state.StageTicks % 25 != 0)
+                return;
+
             foreach (int idx in _state.CloneIndices)
             {
-                if (idx < 0 || idx >= Main.maxNPCs)
-                    continue;
-
-                NPC clone = Main.npc[idx];
-                if (!clone.active)
-                    continue;
-
-                clone.direction = clone.Center.X >= groupCenter.X ? -1 : 1;
-                clone.spriteDirection = clone.direction;
-                clone.velocity = Vector2.Zero;
-                TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", idx);
-
-                if (_state.StageTicks % 15 == 0)
+                if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
                 {
-                    Vector2 dir = new Vector2(clone.direction, 0f);
-                    FireSingleLaserFromClone(clone, dir);
+                    NPC clone = Main.npc[idx];
+                    Vector2 dir = targetCenter - clone.Center;
+                    if (dir.Length() > 0.01f)
+                    {
+                        dir.Normalize();
+                        FireSingleLaserFromClone(clone, dir);
+                    }
                 }
+            }
+        }
+
+        private void FireSingleLaserFromClone(NPC clone, Vector2 dir)
+        {
+            int projIdx = Projectile.NewProjectile(
+                NPC.GetBossSpawnSource(-1),
+                clone.Center,
+                dir * 14f,
+                ProjectileID.DeathLaser,
+                22,
+                0f,
+                Main.myPlayer
+            );
+
+            if (projIdx >= 0 && projIdx < Main.maxProjectiles)
+            {
+                Main.projectile[projIdx].hostile = true;
+                Main.projectile[projIdx].friendly = false;
+                TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", projIdx);
             }
         }
 
         private void KeepOnlyTopRightClone(Vector2 groupCenter)
         {
-            int chosenIndex = -1;
-            for (int i = 0; i < _state.CloneIndices.Count; i++)
+            int bestIdx = -1;
+            float bestScore = float.NegativeInfinity;
+
+            foreach (int idx in _state.CloneIndices)
             {
-                int idx = _state.CloneIndices[i];
                 if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
                 {
-                    if (chosenIndex == -1)
-                        chosenIndex = idx;
+                    Vector2 rel = Main.npc[idx].Center - groupCenter;
+                    float score = rel.X - rel.Y;
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestIdx = idx;
+                    }
+                }
+            }
+
+            List<int> kept = new List<int>();
+            foreach (int idx in _state.CloneIndices)
+            {
+                if (idx >= 0 && idx < Main.maxNPCs && Main.npc[idx].active)
+                {
+                    if (idx == bestIdx)
+                    {
+                        kept.Add(idx);
+                    }
                     else
                     {
                         Main.npc[idx].active = false;
@@ -671,68 +704,7 @@ namespace EyeBossTrueEyeAllPlayers
                     }
                 }
             }
-
-            _state.CloneIndices.Clear();
-            if (chosenIndex != -1)
-            {
-                NPC clone = Main.npc[chosenIndex];
-                clone.Center = groupCenter + new Vector2(220f, -180f);
-                clone.velocity = Vector2.Zero;
-                _state.CloneIndices.Add(chosenIndex);
-                TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", chosenIndex);
-            }
-        }
-
-        private void FireSingleLaserFromClone(NPC clone, Vector2 direction)
-        {
-            Vector2 normDir = direction.LengthSquared() > 0.001f ? Vector2.Normalize(direction) : new Vector2(-1f, 0f);
-            float speed = 16f;
-            int projIdx = Projectile.NewProjectile(
-                clone.GetSpawnSource_ForProjectile(),
-                clone.Center,
-                normDir * speed,
-                ProjectileID.PhantasmalDeathray,
-                999999,
-                0f,
-                Main.myPlayer
-            );
-
-            if (projIdx >= 0 && projIdx < Main.maxProjectiles)
-            {
-                Projectile proj = Main.projectile[projIdx];
-                proj.damage = 999999;
-                proj.hostile = true;
-                proj.friendly = false;
-                proj.tileCollide = false;
-                TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", projIdx);
-            }
-        }
-
-        private void HandleSurrenderIdle(NPC boss)
-        {
-            CleanupClonesAndEyes();
-            LockHorizontalMovementForPlayers(false);
-
-            Vector2 targetIdlePos = GetAlivePlayersCenter() + new Vector2(0f, -75f);
-            boss.Center = Vector2.Lerp(boss.Center, targetIdlePos, 0.25f);
-            boss.velocity = Vector2.Zero;
-            boss.damage = 0;
-            boss.dontTakeDamage = true;
-            boss.alpha = 0;
-            boss.noTileCollide = true;
-
-            for (int i = 0; i < Main.maxPlayers; i++)
-            {
-                Player p = Main.player[i];
-                if (p != null && p.active && !p.dead)
-                {
-                    boss.direction = p.Center.X >= boss.Center.X ? 1 : -1;
-                    boss.spriteDirection = boss.direction;
-                    break;
-                }
-            }
-
-            TSPlayer.All.SendData(PacketTypes.NpcUpdate, "", boss.whoAmI);
+            _state.CloneIndices = kept;
         }
     }
 }
