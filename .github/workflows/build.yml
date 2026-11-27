@@ -1,9 +1,8 @@
-name: Build TShock Plugin DLL
+name: Build Plugin
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -16,14 +15,17 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "6.0.x"
+          dotnet-version: '6.0.x'
+
+      - name: Download OTAPI.dll
+        run: curl -fL "https://github.com/dnphsamikaachkhckhc-web/EyeBossTrueEyeAllPlayers/releases/download/1.0/OTAPI.dll" -o OTAPI.dll
 
       - name: Restore and Build DLL
-        run: dotnet build EyeBossTrueEyeAllPlayers.csproj -c Release
+        run: dotnet build EyeBossTrueEyeAllPlayers.csproj -c Release -o out
 
-      - name: Upload DLL artifact
+      - name: Upload DLL Artifact
         uses: actions/upload-artifact@v4
         with:
           name: EyeBossTrueEyeAllPlayers-dll
-          path: bin/Release/**/*.dll
+          path: out/EyeBossTrueEyeAllPlayers.dll
           
