@@ -5,20 +5,36 @@
     <AssemblyName>EyeBossTrueEyeAllPlayers</AssemblyName>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="EyeBossTrueEyeAllPlayers.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="TerrariaServer">
-      <HintPath Condition="Exists('TerrariaServer.exe')">TerrariaServer.exe</HintPath>
-      <HintPath Condition="Exists('terrariaserver.exe')">terrariaserver.exe</HintPath>
+      <HintPath>TerrariaServer.exe</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="TShockAPI">
-      <HintPath Condition="Exists('TShockAPI.dll')">TShockAPI.dll</HintPath>
-      <HintPath Condition="Exists('tshockapi.dll')">tshockapi.dll</HintPath>
+      <HintPath>TShockAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="*.dll" Exclude="EyeBossTrueEyeAllPlayers.dll">
+    <Reference Include="Microsoft.Xna.Framework" Condition="Exists('Microsoft.Xna.Framework.dll')">
+      <HintPath>Microsoft.Xna.Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Xna.Framework.Game" Condition="Exists('Microsoft.Xna.Framework.Game.dll')">
+      <HintPath>Microsoft.Xna.Framework.Game.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Xna.Framework.Graphics" Condition="Exists('Microsoft.Xna.Framework.Graphics.dll')">
+      <HintPath>Microsoft.Xna.Framework.Graphics.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Xna.Framework.Xna" Condition="Exists('Microsoft.Xna.Framework.Xna.dll')">
+      <HintPath>Microsoft.Xna.Framework.Xna.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
